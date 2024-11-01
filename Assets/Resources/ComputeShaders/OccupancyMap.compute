@@ -1,0 +1,48 @@
+// Each #kernel tells which function to compile; you can have many kernels
+//#pragma kernel OccupancyMap
+#pragma kernel OccupancyMap
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture3D<float> Result;
+RWTexture3D<int> dist_swap;
+int BlockSize;
+float3 Dimensions;
+Texture3D Volume;
+SamplerState samplerVolume;
+int depth;
+int bkgThreshold;
+
+[numthreads(8, 8, 8)]
+void OccupancyMap(uint3 id : SV_DispatchThreadID)
+{
+    float3 uv;
+    float3 base = float3(id.x, id.y, id.z) * BlockSize;
+    uint ret = 1;
+    //bool flag = false;
+    float maximum = 0;
+    float count = 0;
+    //ret = (float3(id.x, id.y, depth) / Dimensions).x;
+    for (int i = 0; i < BlockSize; i++) {
+        for (int j = 0; j < BlockSize; j++) {
+            for (int k = 0; k < BlockSize; k++) {
+                uv = base + float3(i, j, k);
+                uv = uv / Dimensions;
+                float v = Volume.SampleLevel(samplerVolume, uv, 0);
+                if (v >= bkgThreshold/255.0f) {
+                    count++;
+                    maximum = max(maximum, v);
+                }
+
+            }
+        }
+    }
+    if (count/BlockSize/ BlockSize/ BlockSize>=0.025) {
+        Result[id] = maximum;
+        dist_swap[id] = 1;
+    }
+    else {
+        Result[id] = 0;
+        dist_swap[id] = 0;
+    }
+}

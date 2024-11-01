@@ -1,0 +1,549 @@
+// Each #kernel tells which function to compile; you can have many kernels
+//FIM DT Kernel 
+#pragma kernel InitBound
+#pragma kernel InitActive
+#pragma kernel UpdateActive
+
+#pragma kernel visualizeTexture
+#pragma kernel InitRemedy
+#pragma kernel UpdateRemedy
+
+//FIM Tree Kernel
+#pragma kernel InitSeed
+#pragma kernel UpdateFarStateTree
+#pragma kernel UpdateSourceValueTree
+#pragma kernel UpdateSourceStateTree
+#pragma kernel InitRemedyTree
+#pragma kernel UpdateRemedyTree
+#pragma kernel UpdateRemedyNeighborTree
+#pragma kernel GetParent
+
+
+// state tag def
+#define ACTIVE 0
+#define SOURCE 1
+#define FAR 2
+#define REMEDY 3
+#define CONVERGE 4
+#define BACKGROUND 5
+#define INFINITE 10000000
+#define Epsilon 1e-6
+
+void SetBoundary(RWTexture3D<uint> target, uint3 index, bool isBoundary, uint tagBit)
+{
+    target[index] |= ((isBoundary ? 1 : 0) << tagBit);
+}
+
+RWTexture3D<uint> state;
+RWTexture3D<float> gwdt;
+RWTexture3D<float> visualize;
+Texture3D<float> volume;
+int bkgThreshold;
+uint3 dims;
+uint3 dispatch;
+
+uint PosToIndex(uint3 pos)
+{
+    uint index = pos.x + pos.y * dims.x + pos.z * dims.x * dims.y;
+    return index;
+}
+
+uint3 IndexToPos(uint index)
+{
+    uint x = index % dims.x;
+    uint y = (index / dims.x) % dims.y;
+    uint z = (index / dims.x / dims.y) % dims.z;
+    return uint3(x, y, z);
+}
+
+
+AppendStructuredBuffer<uint> activeSet;
+RWStructuredBuffer<uint> activeBuffer;
+uint activeCount;
+[numthreads(4,4,4)]
+void InitBound (uint3 id : SV_DispatchThreadID)
+{
+    if (volume[id] < bkgThreshold / 255.0f || id.z == 0 || id.z == (dims.z - 1))
+    {
+        state[id] = SOURCE;
+        gwdt[id] = volume[id];
+    }
+    else
+    {
+        state[id] = FAR;
+        gwdt[id] = INFINITE;
+    }
+}
+
+[numthreads(4,4,4)]
+void InitActive(uint3 id : SV_DispatchThreadID)
+{
+    if (state[id] == FAR)
+    {
+        bool isActive = false;
+        for (int i = -1; i <= 1; i++)
+        {
+            int x2 = (int) id.x + i;
+            if (x2 < 0 || x2 >= (int) dims.x)
+                continue;
+            for (int j = -1; j <= 1; j++)
+            {
+                int y2 = (int) id.y + j;
+                if (y2 < 0 || y2 >= (int) dims.y)
+                    continue;
+                for (int k = -1; k <= 1; k++)
+                {
+                    int z2 = (int) id.z + k;
+                    if (z2 < 0 || z2 >= (int) dims.z)
+                        continue;
+                    int offset = abs(i) + abs(j) + abs(k);
+                    if (offset > 2)
+                        continue;
+                    isActive = isActive || state[uint3(x2, y2, z2)] == SOURCE;
+                }
+            }
+        }
+        
+        if (isActive)
+        {
+            state[id] = ACTIVE;
+            uint index = PosToIndex(id);
+            activeSet.Append(index);
+        }
+    }
+}
+
+
+[numthreads(64,1,1)]
+void UpdateActive(uint3 id : SV_DispatchThreadID)
+{
+    uint bufferIndex = id.x;
+    if (bufferIndex < activeCount)
+    {
+        uint imgIndex = activeBuffer[bufferIndex];
+        uint3 imgPos = IndexToPos(imgIndex);
+        float min_dist = INFINITE;
+        for (int i = -1; i <= 1; i++)
+        {
+            int x2 = (int) imgPos.x + i;
+            if (x2 < 0 || x2 >= (int) dims.x)
+                continue;
+            for (int j = -1; j <= 1; j++)
+            {
+                int y2 = (int) imgPos.y + j;
+                if (y2 < 0 || y2 >= (int) dims.y)
+                    continue;
+                for (int k = -1; k <= 1; k++)
+                {
+                    int z2 = (int) imgPos.z + k;
+                    if (z2 < 0 || z2 >= (int) dims.z)
+                        continue;
+                    int offset = abs(i) + abs(j) + abs(k);
+                    if (offset > 2)
+                        continue;
+                    uint3 imgPos2 = uint3(x2, y2, z2);
+                    if (state[imgPos2] == SOURCE)
+                    {
+                        float new_dist = gwdt[imgPos2] + volume[imgPos] * sqrt(offset);
+                        min_dist = min(min_dist, new_dist);
+                    }
+                    else if(state[imgPos2] == FAR)
+                    {
+                        state[imgPos2] = ACTIVE;
+                        activeSet.Append(PosToIndex(imgPos2));
+                    }
+                }
+            }
+        }
+        gwdt[imgPos] = min_dist;
+        state[imgPos] = SOURCE;
+    }
+}
+
+
+AppendStructuredBuffer<uint> remedySet;
+RWStructuredBuffer<uint> remedyBuffer;
+uint remedyCount;
+[numthreads(4, 4, 4)]
+void InitRemedy(uint3 id : SV_DispatchThreadID)
+{
+    float min_dist = INFINITE;
+    for (int i = -1; i <= 1; i++)
+    {
+        int x2 = (int) id.x + i;
+        if (x2 < 0 || x2 >= (int) dims.x)
+            continue;
+        for (int j = -1; j <= 1; j++)
+        {
+            int y2 = (int) id.y + j;
+            if (y2 < 0 || y2 >= (int) dims.y)
+                continue;
+            for (int k = -1; k <= 1; k++)
+            {
+                int z2 = (int) id.z + k;
+                if (z2 < 0 || z2 >= (int) dims.z)
+                    continue;
+                int offset = abs(i) + abs(j) + abs(k);
+                if (offset > 2)
+                    continue;
+                uint3 id2 = uint3(x2, y2, z2);
+                float new_dist = gwdt[id2] + volume[id] * sqrt(offset);
+                min_dist = min(min_dist, new_dist);
+            }
+        }
+    }
+    if (gwdt[id] > min_dist)
+    {
+        state[id] = REMEDY;
+        remedySet.Append(PosToIndex(id));
+    }
+    else
+    {
+        state[id] = CONVERGE;
+    }
+}
+
+[numthreads(128,1,1)]
+void UpdateRemedy(uint3 id : SV_DispatchThreadID)
+{
+    uint bufferIndex = id.x;
+    if (bufferIndex < remedyCount)
+    {
+        uint imgIndex = remedyBuffer[bufferIndex];
+        uint3 imgPos = IndexToPos(imgIndex);
+        float min_dist = INFINITE;
+        for (int i = -1; i <= 1; i++)
+        {
+            int x2 = (int) imgPos.x + i;
+            if (x2 < 0 || x2 >= (int) dims.x)
+                continue;
+            for (int j = -1; j <= 1; j++)
+            {
+                int y2 = (int) imgPos.y + j;
+                if (y2 < 0 || y2 >= (int) dims.y)
+                    continue;
+                for (int k = -1; k <= 1; k++)
+                {
+                    int z2 = (int) imgPos.z + k;
+                    if (z2 < 0 || z2 >= (int) dims.z)
+                        continue;
+                    int offset = abs(i) + abs(j) + abs(k);
+                    if (offset > 2)
+                        continue;
+                    uint3 imgPos2 = uint3(x2, y2, z2);
+                    if (state[imgPos2] != REMEDY)
+                    {
+                        state[imgPos2] = REMEDY;
+                        remedySet.Append(PosToIndex(imgPos2));
+                    }
+                    float new_dist = gwdt[imgPos2] + volume[imgPos] * sqrt(offset);
+                    min_dist = min(min_dist, new_dist);
+                }
+            }
+        }
+        if (gwdt[id] > min_dist)
+        {
+            gwdt[id] = min_dist;
+            remedySet.Append(PosToIndex(id));
+        }
+        else
+        {
+            state[id] = CONVERGE;
+        }
+    }
+}
+
+RWStructuredBuffer<int> maxIndex;
+[numthreads(4, 4, 4)]
+void GetMaximum(uint3 id : SV_DispatchThreadID)
+{
+
+}
+
+RWStructuredBuffer<float> gwdtBuffer1;
+RWStructuredBuffer<float> gwdtBuffer2;
+[numthreads(4,4,4)]
+void visualizeTexture(uint3 id : SV_DispatchThreadID)
+{
+    uint index = PosToIndex(id);
+    if (index < dims.x * dims.y * dims.z / 2)
+    {
+        gwdtBuffer1[index] = gwdt[id];
+    }
+    else
+    {
+        gwdtBuffer2[index - dims.x * dims.y * dims.z / 2] = gwdt[id];
+    }
+}
+
+uint3 seed;
+int seedIndex;
+RWTexture3D<float> phi;
+RWTexture3D<uint> parent;
+float maxIntensity;
+[numthreads(4, 4, 4)]
+void InitSeed(uint3 id : SV_DispatchThreadID)
+{
+    if (PosToIndex(id) == (uint)seedIndex)
+    {
+        state[id] = ACTIVE;
+        phi[id] = 0;
+    }
+    else if (gwdt[id] < bkgThreshold / 255.0f)
+    {
+        state[id] = BACKGROUND;
+        phi[id] = INFINITE;
+    }
+    else
+    {
+        state[id] = FAR;
+        phi[id] = INFINITE;    
+    }
+    parent[id] = PosToIndex(id);
+}
+
+[numthreads(4, 4, 4)]
+void UpdateFarStateTree(uint3 id : SV_DispatchThreadID)
+{
+    if (state[id] == FAR)
+    {
+        bool isSource = false;
+        for (int i = -1; i <= 1; i++)
+        {
+            int x2 = (int) id.x + i;
+            if (x2 < 0 || x2 >= (int) dims.x)
+                continue;
+            for (int j = -1; j <= 1; j++)
+            {
+                int y2 = (int) id.y + j;
+                if (y2 < 0 || y2 >= (int) dims.y)
+                    continue;
+                for (int k = -1; k <= 1; k++)
+                {
+                    int z2 = (int) id.z + k;
+                    if (z2 < 0 || z2 >= (int) dims.z)
+                        continue;
+                    int offset = abs(i) + abs(j) + abs(k);
+                    if (offset > 2)
+                        continue;
+                    isSource = isSource || state[uint3(x2, y2, z2)] == ACTIVE;
+                }
+            }
+        }
+        
+        if (isSource)
+        {
+            state[id] = SOURCE;
+            uint index = PosToIndex(id);
+            activeSet.Append(index);
+        }
+    }
+}
+
+float GI(float intensity)
+{
+    float lamda = 10;
+    float ret = exp(lamda * (1 - intensity / maxIntensity) * (1 - intensity / maxIntensity));
+    return ret;
+}
+
+[numthreads(4, 4, 4)]
+void UpdateSourceValueTree(uint3 id : SV_DispatchThreadID)
+{
+    if (state[id] == SOURCE)
+    {
+        float min_dist = INFINITE;
+        for (int i = -1; i <= 1; i++)
+        {
+            int x2 = (int) id.x + i;
+            if (x2 < 0 || x2 >= (int) dims.x)
+                continue;
+            for (int j = -1; j <= 1; j++)
+            {
+                int y2 = (int) id.y + j;
+                if (y2 < 0 || y2 >= (int) dims.y)
+                    continue;
+                for (int k = -1; k <= 1; k++)
+                {
+                    int z2 = (int) id.z + k;
+                    if (z2 < 0 || z2 >= (int) dims.z)
+                        continue;
+                    int offset = abs(i) + abs(j) + abs(k);
+                    if (offset > 2)
+                        continue;
+                    uint3 id2 = uint3(x2, y2, z2);
+                    if (state[id2] == ACTIVE)
+                    {
+                        float new_dist = phi[id2] + (GI(gwdt[id]) + GI(gwdt[id2])) * sqrt(offset) * 0.5;
+                        if (new_dist < min_dist)
+                        {
+                            min_dist = min(min_dist, new_dist);
+                            parent[id] = PosToIndex(id2);
+                            phi[id] = min_dist;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+[numthreads(4, 4, 4)]
+void UpdateSourceStateTree(uint3 id : SV_DispatchThreadID)
+{
+    if (state[id] == SOURCE)
+        state[id] = ACTIVE;
+}
+
+[numthreads(4, 4, 4)]
+void InitRemedyTree(uint3 id : SV_DispatchThreadID)
+{
+    if (state[id] != ACTIVE)
+    {
+        state[id] = BACKGROUND;
+        return;
+    }
+    float min_dist = INFINITE;
+    for (int i = -1; i <= 1; i++)
+    {
+        int x2 = (int) id.x + i;
+        if (x2 < 0 || x2 >= (int) dims.x)
+            continue;
+        for (int j = -1; j <= 1; j++)
+        {
+            int y2 = (int) id.y + j;
+            if (y2 < 0 || y2 >= (int) dims.y)
+                continue;
+            for (int k = -1; k <= 1; k++)
+            {
+                int z2 = (int) id.z + k;
+                if (z2 < 0 || z2 >= (int) dims.z)
+                    continue;
+                int offset = abs(i) + abs(j) + abs(k);
+                if (offset > 2)
+                    continue;
+                uint3 id2 = uint3(x2, y2, z2);
+                float new_dist = phi[id2] + (GI(gwdt[id]) + GI(gwdt[id2])) * sqrt(offset) * 0.5;
+                min_dist = min(min_dist, new_dist);
+            }
+        }
+    }
+    if (phi[id] > min_dist)
+    {
+        state[id] = REMEDY;
+        remedySet.Append(PosToIndex(id));
+    }
+    else
+    {
+        state[id] = CONVERGE;
+    }
+}
+
+[numthreads(4, 4, 4)]
+void UpdateRemedyTree(uint3 id : SV_DispatchThreadID)
+{
+    uint parentIndex;
+    if (state[id] == REMEDY)
+    {
+        float min_dist = INFINITE;
+        for (int i = -1; i <= 1; i++)
+        {
+            int x2 = (int) id.x + i;
+            if (x2 < 0 || x2 >= (int) dims.x)
+                continue;
+            for (int j = -1; j <= 1; j++)
+            {
+                int y2 = (int) id.y + j;
+                if (y2 < 0 || y2 >= (int) dims.y)
+                    continue;
+                for (int k = -1; k <= 1; k++)
+                {
+                    int z2 = (int) id.z + k;
+                    if (z2 < 0 || z2 >= (int) dims.z)
+                        continue;
+                    int offset = abs(i) + abs(j) + abs(k);
+                    if (offset > 2)
+                        continue;
+                    uint3 id2 = uint3(x2, y2, z2);
+                    
+                    float new_dist = phi[id2] + (GI(gwdt[id]) + GI(gwdt[id2])) * sqrt(offset) * 0.5;
+                    if (new_dist < min_dist)
+                    {
+                        min_dist = min(min_dist, new_dist);
+                        parentIndex = PosToIndex(id2);
+                    }
+                }
+            }
+        }
+        
+        if (phi[id] > min_dist)
+        {
+            phi[id] = min_dist;
+            parent[id] = parentIndex;
+            remedySet.Append(PosToIndex(id));
+        }
+        else
+        {
+            state[id] = CONVERGE;
+        }
+    }
+}
+
+[numthreads(4, 4, 4)]
+void UpdateRemedyNeighborTree(uint3 id : SV_DispatchThreadID)
+{
+    if (state[id] == BACKGROUND)
+        return;
+    bool isNeighbor = false;
+    for (int i = -1; i <= 1; i++)
+    {
+        int x2 = (int) id.x + i;
+        if (x2 < 0 || x2 >= (int) dims.x)
+            continue;
+        for (int j = -1; j <= 1; j++)
+        {
+            int y2 = (int) id.y + j;
+            if (y2 < 0 || y2 >= (int) dims.y)
+                continue;
+            for (int k = -1; k <= 1; k++)
+            {
+                int z2 = (int) id.z + k;
+                if (z2 < 0 || z2 >= (int) dims.z)
+                    continue;
+                int offset = abs(i) + abs(j) + abs(k);
+                if (offset > 2)
+                    continue;
+                uint3 id2 = uint3(x2, y2, z2);
+                isNeighbor = isNeighbor || state[id2] == REMEDY;
+            }
+        }
+    }
+    if (isNeighbor && state[id] != REMEDY)
+    {
+        state[id] = REMEDY;
+        remedySet.Append(PosToIndex(id));
+    }
+}
+
+
+RWStructuredBuffer<uint> parentBuffer1;
+RWStructuredBuffer<uint> parentBuffer2;
+[numthreads(4, 4, 4)]
+void GetParent(uint3 id : SV_DispatchThreadID)
+{
+    uint index = PosToIndex(id);
+    if (index < dims.x * dims.y * dims.z / 2)
+    {
+        parentBuffer1[index] = parent[id];
+    }
+    else
+    {
+        parentBuffer2[index - dims.x * dims.y * dims.z / 2] = parent[id];
+    }
+}
+
+
+
+
+
+

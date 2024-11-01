@@ -1,0 +1,38 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel DistanceMap
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float> Result;
+float3 dM;
+Texture3D OccupancyMap;
+SamplerState samplerOccupancyMap;
+int depth;
+
+[numthreads(8,8,1)]
+void DistanceMap(uint3 id : SV_DispatchThreadID)
+{
+    int distance = 100;
+    float3 uv = float3(id.x, id.y, depth) / dM;
+    float v = OccupancyMap.SampleLevel(samplerOccupancyMap, uv, 0);
+    if (v > 0) {
+        Result[id.xy] = 0;
+    }
+    else {
+        for (int i = 0; i < dM.x; i++) {
+            for (int j = 0; j < dM.y; j++) {
+                for (int k = 0; k < dM.z; k++) {
+                    float3 uv = float3(i, j, k) / dM;
+                    float v = OccupancyMap.SampleLevel(samplerOccupancyMap, uv, 0);
+                    if (v > 0) {
+                        int dist = max(abs(i - (int)id.x), max(abs(j - (int)id.y), abs(k - (int)depth)));
+                        distance = min(distance, dist);
+                    }
+                }
+            }
+        }
+        Result[id.xy] = distance/dM.x;
+    }
+    // TODO: insert actual code here!
+    
+}

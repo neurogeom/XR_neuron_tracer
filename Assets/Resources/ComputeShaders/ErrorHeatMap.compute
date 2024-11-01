@@ -1,0 +1,41 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture3D <float> Result;
+float _Diameter = 0.0025;
+float _Strength = 0.1;
+
+float distsq(float3 a, float3 b)
+{
+	// float area_of_effect_size =  20.0f; //for 1024
+	float area_of_effect_size =  10.0f; //for 512
+
+	return  pow(max(0.0, 1.0 - distance(a, b) / area_of_effect_size), 2.0);
+}
+
+StructuredBuffer<float> _Hits;
+int _HitCount;
+uint3 dims;
+
+[numthreads(8,8,8)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	float strength =  0.05f; 
+	strength =  0.12f; //for APP2
+	// strength = 0.05f;//AR
+	strength = 0.12f; //AR
+	// strength = 0.01f;
+    float totalWeight = 0;
+		//	float3 work_pt = float3(0.5f,0.5f,0.5f);
+		//totalWeight = 0.1 * distsq(float3(id.x/1024.0f,id.y/1024.0f,id.z/128.0f), work_pt) * 100.0f;
+	for (int i = 0; i < _HitCount; i++) 
+	{
+		float3 work_pt = float3(_Hits[3*i],_Hits[3*i+1],_Hits[3*i+2]);
+		totalWeight += 0.1 * distsq(float3(id.x,id.y,id.z), work_pt) * strength;
+	}
+	Result[id] = totalWeight;
+	//Result[id] = totalWeight*100;
+
+}

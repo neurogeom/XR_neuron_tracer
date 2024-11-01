@@ -1,0 +1,150 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1951327602390588477
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1951327602390588476}
+  - component: {fileID: 1951327602390588473}
+  - component: {fileID: 1951327602390588472}
+  - component: {fileID: 1951327602390589383}
+  - component: {fileID: 1762420453882920886}
+  m_Layer: 0
+  m_Name: Config
+  m_TagString: Config
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1951327602390588476
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1951327602390588477}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0.059, y: 1.8001158, z: 1.2344505}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1951327602390588473
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1951327602390588477}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c72297d7cb792d4418c9349815d5c937, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  configuration: {fileID: 11400000, guid: bc7d5d129dbd60f4eac8307da8f6df66, type: 2}
+  path: C:\Users\80121\Desktop\MyResult\17302_00002_2048\016\-1_resampled_growth.swc
+  savePath: C:\Users\80121\Desktop\MyResult\
+  needImport: 0
+  scale: 1
+  gaussianSmoothing: 0
+  forceRootCenter: 1
+  imageName: 
+  scaledVolume: {fileID: 0}
+  origin: {fileID: 11700000, guid: c8436c1cc65b50b4b90ac662c35ae6c1, type: 2}
+  _filtered: {fileID: 0}
+  scaledDim: {x: 512, y: 512, z: 128}
+  originalDim: {x: 0, y: 0, z: 0}
+  _occupancy: {fileID: 0}
+  bkgThresh: 0
+  _blockSize: 0
+  seed: {fileID: 0}
+  cube: {fileID: 0}
+  paintingBoard: {fileID: 0}
+  _rootPos: {x: 256, y: 257, z: 62}
+  somaRadius: -1
+  viewThresh: 0
+  curIndex: 0
+  thresholdBlockSize: 1
+  _vrShaderType: 0
+  useBatch: 0
+  useKeyBoard: 1
+  customThresh: 30
+  runner: {fileID: 0}
+  volumeRendering: {fileID: 0}
+  tracer: {fileID: 0}
+  gestureController: {fileID: 0}
+  gazeController: {fileID: 1951327602390589383}
+  invoker: {fileID: 0}
+  originMaterial: {fileID: 2100000, guid: 16511326e1a017444a6805257b78f103, type: 2}
+  bkgThresholdMaterial: {fileID: 2100000, guid: 57704e1a1cdfeef44a4129e327d8e5e4, type: 2}
+  fixedBkgThresholdMaterial: {fileID: 2100000, guid: e8d7bde713b78704eae5396aea7f9f29, type: 2}
+  thresholdOffset: -50
+  viewRadius: 10.24
+  volumeRenderingWithChebyshev: 0
+  occupancyMap: {fileID: 0}
+  distanceMap: {fileID: 0}
+  radiusScale: 1
+  selectedIndex: 0
+  isIsolating: 1
+  resampleFactor: 5
+  needFilter: 1
+--- !u!114 &1951327602390588472
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1951327602390588477}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1a8755a34f13ff04fab0bddfe2c60376, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  operation: 0
+  canDraw: 1
+--- !u!114 &1951327602390589383
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1951327602390588477}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5cf12b4191469c64abc1e9cf6e2978d3, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  interactionType: 0
+  gazeState: 0
+  editTimeInterval: 1
+  dampTime: 0.12
+  adjustSpeed: 0.1
+--- !u!114 &1762420453882920886
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1951327602390588477}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -1552182283, guid: e725a070cec140c4caffb81624c8c787, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  ObjectInterest: 1
+  DefaultInterestGroups: []
+  DestroyWhenStateAuthorityLeaves: 0
+  AllowStateAuthorityOverride: 1
+  AoiPositionSource: {fileID: 0}
+  Flags: 2305
+  NetworkGuid:
+    RawGuidValue: 352995c9185f28549b3532d2f423c021
+  NestedObjects: []
+  NetworkedBehaviours: []
+  SimulationBehaviours: []

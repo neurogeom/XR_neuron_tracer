@@ -1,0 +1,50 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel DistanceMap
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+float3 dM;
+Texture3D OccupancyMap;
+SamplerState samplerOccupancyMap;
+int depth;
+
+[numthreads(8, 8, 1)]
+void DistanceMap(uint3 id : SV_DispatchThreadID)
+{
+    float max_distance = max(dM.x, max(dM.y, dM.z));
+    float4 distance = float4(max_distance, max_distance, max_distance, max_distance);
+    float3 uv = float3(id.x, id.y, depth) / dM;
+    float v = OccupancyMap.SampleLevel(samplerOccupancyMap, uv, 0);
+        for (int i = 0; i < dM.x; i++) {
+            for (int j = 0; j < dM.y; j++) {
+                for (int k = 0; k < dM.z; k++) {
+                    float3 uv = float3(i, j, k) / dM;
+                    float v = OccupancyMap.SampleLevel(samplerOccupancyMap, uv, 0);
+                    if (v > 30/255.0f) {
+                        float chebyshevDist = max(abs(i - (int)id.x), max(abs(j - (int)id.y), abs(k - (int)depth)));
+                        float4 dist = float4(chebyshevDist, max_distance, max_distance, max_distance);
+                        distance = min(distance, dist);
+                    }
+                    if (v > 80 / 255.0f) {
+                        float chebyshevDist = max(abs(i - (int)id.x), max(abs(j - (int)id.y), abs(k - (int)depth)));
+                        float4 dist = float4(max_distance, chebyshevDist, max_distance, max_distance);
+                        distance = min(distance, dist);
+                    }
+                    if (v > 130 / 255.0f) {
+                        float chebyshevDist = max(abs(i - (int)id.x), max(abs(j - (int)id.y), abs(k - (int)depth)));
+                        float4 dist = float4(max_distance, max_distance, chebyshevDist, max_distance);
+                        distance = min(distance, dist);
+                    }
+                    if (v > 180 / 255.0f) {
+                        float chebyshevDist = max(abs(i - (int)id.x), max(abs(j - (int)id.y), abs(k - (int)depth)));
+                        float4 dist = float4(max_distance, max_distance, max_distance, chebyshevDist);
+                        distance = min(distance, dist);
+                    }
+                }
+            }
+        }
+        Result[id.xy] = distance / 64.0f;
+    // TODO: insert actual code here!
+
+}

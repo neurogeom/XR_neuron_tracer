@@ -1,0 +1,63 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Scale
+#pragma kernel Smooth
+#pragma kernel Copy
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture3D<float> Result;
+float3 dims;
+Texture3D<float> Volume;
+SamplerState samplerVolume;
+
+[numthreads(4,4,4)]
+void Scale (uint3 id : SV_DispatchThreadID)
+{
+    float3 uv = id/dims;
+    //float v = Volume.Load(uv);
+    float v = Volume.SampleLevel(samplerVolume, uv, 0);
+    Result[id] = v;
+}
+
+Texture3D<float> Source;
+SamplerState samplerSource;
+RWTexture3D<float> Destination;
+float sigma;
+int kernelSize;
+
+
+float Gaussian(float x, float y, float z, float sigma)
+{
+    float coeff = 1.0f / (pow((2.0f * 3.14159265359f * sigma * sigma), 1.5f));
+    float exponent = -((x * x) + (y * y) + (z * z)) / (2.0f * sigma * sigma);
+    return coeff * exp(exponent);
+}
+
+[numthreads(4,4,4)]
+void Smooth (uint3 id : SV_DispatchThreadID)
+{
+    int halfKernelSize = (kernelSize-1)/2;
+    float sum =0;
+    float total_weight = 0;
+    for(int z = -halfKernelSize;z<=halfKernelSize;++z)
+    {
+        for(int y = -halfKernelSize;y<=halfKernelSize;++y)
+        {
+            for(int x = -halfKernelSize;x<=halfKernelSize;++x)
+            {
+                int3 offset = int3(x,y,z);
+                float weight = Gaussian(x, y, z, sigma);
+                total_weight += weight;
+                float3 uv = (id + offset) / dims;
+                sum += weight* Source.SampleLevel(samplerSource, uv, 0);
+            }       
+        }
+    }
+    Destination[id] = sum/total_weight;
+}
+
+[numthreads(4,4,4)]
+void Copy (uint3 id : SV_DispatchThreadID)
+{
+    Destination[id] = Source[id];
+}

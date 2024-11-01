@@ -1,0 +1,800 @@
+// Each #kernel tells which function to compile; you can have many kernels
+//FIM DT Kernel 
+#pragma enable_d3d11_debug_symbols
+
+#pragma kernel InitBound
+#pragma kernel UpdateDT
+#pragma kernel GetDistanceTransformForeground
+
+//FIM Tree Kernel
+#pragma kernel InitSeed
+#pragma kernel UpdateTree
+#pragma kernel GetParent
+
+//FIM Full Image Kernel
+#pragma kernel InitSeedFI
+#pragma kernel UpdateFI
+
+//FIM Tracing Branch
+#pragma kernel AdjustIntensity
+#pragma kernel AdjustIntensityWithValue
+#pragma kernel InitBias
+#pragma kernel ApplyBias
+
+#pragma kernel ModifyMask
+#pragma kernel ModifySelection
+
+//Get ConnectPart
+#pragma kernel InitConnectionSeed
+#pragma kernel UpdateConnection
+
+#pragma kernel InitClusterSeed
+#pragma kernel UpdateCluster
+
+#pragma kernel InitTrunk
+#pragma kernel UpdateTrunk
+
+#pragma kernel InitErase
+
+#pragma kernel TransformDataUint
+#pragma kernel TransformDataFloat
+#pragma kernel Visualization
+
+#pragma kernel CopyData
+#pragma kernel GetMaskedVolumeData
+#pragma kernel GetPhi
+#pragma kernel GetBuff
+#pragma kernel GetDiff
+
+// state tag def
+#define SOURCE 0
+#define ACTIVE 1
+#define FAR 2
+#define REMEDY 3
+#define CONVERGE 4
+#define BACKGROUND 5
+#define INFINITE 3.4028235E29f
+#define Epsilon 1e-6
+#define SQRT2 1.414213562373
+
+#define THREAD_X 4
+#define THREAD_Y 4
+#define THREAD_Z 4
+#define NEIGHBORHOOD_X THREAD_X+2
+#define NEIGHBORHOOD_Y THREAD_Y+2
+#define NEIGHBORHOOD_Z THREAD_Z+2
+
+#define THRESHOLD_BLOCK_SIZE 1
+
+#define GWDT_MIN 0.003922
+
+void SetBoundary(RWTexture3D<uint> target, uint3 index, bool isBoundary, uint tagBit)
+{
+    target[index] |= ((isBoundary ? 1 : 0) << tagBit);
+}
+
+#define max_diff  3
+
+RWTexture3D<uint> state;
+RWTexture3D<float> gwdt;
+RWTexture3D<float> visualize;
+RWTexture3D<float> mask;
+RWTexture3D<float> selection;
+RWTexture3D<float> volume;
+Texture3D<float> origin;
+RWTexture3D<float> bias;
+RWTexture3D<float> threshold;
+int bkgThreshold;
+uint3 dims;
+
+uint3 seed;
+int seedIndex;
+RWTexture3D<float> phi;
+RWTexture3D<uint> parent;
+float maxIntensity;
+
+groupshared float shared_gwdt[NEIGHBORHOOD_X][NEIGHBORHOOD_Y][NEIGHBORHOOD_Z];
+groupshared float shared_phi[NEIGHBORHOOD_X][NEIGHBORHOOD_Y][NEIGHBORHOOD_Z];
+groupshared float shared_state[NEIGHBORHOOD_X][NEIGHBORHOOD_Y][NEIGHBORHOOD_Z];
+groupshared int shared_flag[1];
+
+AppendStructuredBuffer<uint> remedySet;
+RWStructuredBuffer<int> dispatchBuffer;
+
+struct Voxel
+{
+    uint index;
+    float value;
+};
+
+AppendStructuredBuffer<Voxel> foreground;
+
+//int x_offset[] = {-1, -1, -1, -1, -1,  0,  0,  0,  0, 0,  0, 0, 0,  1,  1, 1, 1, 1};
+//int y_offset[] = {-1,  0,  0,  0,  1, -1, -1, -1,  0, 0,  1, 1, 1, -1,  0, 0, 0, 1};
+//int z_offset[] = { 0, -1,  0,  1,  0, -1,  0,  1, -1, 1, -1, 0, 1,  0, -1, 0, 1, 0};
+//int diffs[] =     {2,  2,  1,  2,  2,  2,  1,  2,  1, 1,  2, 1, 2,  2,  2, 1, 2, 2};
+//float sqrt_diffs[] = {1.0f, 1.414213562373095f};
+
+uint PosToIndex(uint3 pos)
+{
+    uint index = pos.x + pos.y * dims.x + pos.z * dims.x * dims.y;
+    return index;
+}
+
+uint3 IndexToPos(uint index)
+{
+    uint x = index % dims.x;
+    uint y = (index / dims.x) % dims.y;
+    uint z = (index / dims.x / dims.y) % dims.z;
+    return uint3(x, y, z);
+}
+
+
+inline float NewDistance(uint3 id, uint3 id2, int diff)
+{
+    //if(phi[id2]==INFINITE) new_dist = INFINITE;
+    //else if (gwdt[id2] <= 1/255.0f) new_dist = INFINITE;
+    //else
+    //{
+    //    new_dist = phi[id2] + sqrt(diff) / ((gwdt[id] / maxIntensity) * (gwdt[id] / maxIntensity) * (gwdt[id2] / maxIntensity) * (gwdt[id2] / maxIntensity));
+    //    //new_dist = phi[id2] + sqrt(diff) / ((gwdt[id] / maxIntensity) * (gwdt[id] / maxIntensity)* (gwdt[id] / maxIntensity)* (gwdt[id] / maxIntensity));
+    //    //new_dist = phi[id2] + sqrt(diff) / ((gwdt[id] / maxIntensity) * (gwdt[id] / maxIntensity));
+    //}   
+    // float factor1 = (max(gwdt[id],GWDTMIN) / 1.0f) * 255;
+    // float factor2 = (max(gwdt[id2],GWDTMIN) / 1.0f) * 255;
+    float factor1 = max(gwdt[id],GWDT_MIN) / maxIntensity;
+    float factor2 = max(gwdt[id2],GWDT_MIN) / maxIntensity;
+    float new_dist = phi[id2] + sqrt(diff) / (factor1 * factor1 * factor2 * factor2);
+
+    //return phi[id2] + sqrt(diff) / (max(gwdt[id2],1/255.0f)*255*2.788)/(max(gwdt[id],1/255.0f)*255*2.788) ;
+
+    return new_dist;
+}
+
+inline float new_distance(float base_distance, float factor_a, float factor_b, int diff)
+{
+    return base_distance + sqrt(diff) / (factor_a * factor_a * factor_b * factor_b);
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void CopyData(uint3 id : SV_DispatchThreadID)
+{
+    volume[id] = origin[id];
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitBound(uint3 id : SV_DispatchThreadID)
+{
+    if (volume[id] < threshold[id] || mask[id] > 0)
+    {
+        state[id] = SOURCE;
+        if (mask[id] > 0)
+        {
+            gwdt[id] = 1 / 255.0f;
+        }
+        else
+        {
+            gwdt[id] = volume[id];
+        }
+    }
+    else
+    {
+        state[id] = ACTIVE; 
+        gwdt[id] = INFINITE;
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateDT(uint3 id : SV_DispatchThreadID, uint3 g_id : SV_GroupThreadID)
+{
+    const int3 neighborhood_size = int3(NEIGHBORHOOD_X, NEIGHBORHOOD_Y, NEIGHBORHOOD_Z);
+    const int3 neighborhood_offset = int3(1, 1, 1);
+    for (int k = 0; k < neighborhood_size.z; k += THREAD_Z)
+    {
+        for (int j = 0; j < neighborhood_size.y; j += THREAD_Y)
+        {
+            for (int i = 0; i < neighborhood_size.x; i += THREAD_X)
+            {
+                const int3 n_id = g_id + int3(i, j, k);
+                if (all(n_id < neighborhood_size))
+                {
+                    const int3 read_at = (int3)id + int3(i, j, k) - neighborhood_offset;
+                    shared_gwdt[n_id.x][n_id.y][n_id.z] = gwdt[read_at];
+                }
+            }
+        }
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    const int3 n_id = g_id + neighborhood_offset;
+    
+    if (state[id] == ACTIVE)
+    {
+        float min_dist = INFINITE;
+        const float intensity = volume[id];
+        for (int offset_z = -1; offset_z<= 1; offset_z++)
+        {
+            for (int offset_y = -1; offset_y <= 1; offset_y++)
+            {
+                for (int offset_x = -1; offset_x <= 1; offset_x++)
+                {
+                    const int3 offset = int3(offset_x, offset_y, offset_z);
+                    const int diff = abs(offset_x) + abs(offset_y) + abs(offset_z);
+                    int3 n_id_source = n_id + offset;
+                    const float new_dist = shared_gwdt[n_id_source.x][n_id_source.y][n_id_source.z] + intensity * sqrt(diff);
+                    min_dist = min(min_dist, new_dist);
+                }
+            }
+        }
+        if (gwdt[id] > min_dist)
+        {
+            gwdt[id] = min_dist; 
+            dispatchBuffer[0] = 1;
+        }
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void GetDistanceTransformForeground(uint3 id : SV_DispatchThreadID)
+{
+    if(state[id]==ACTIVE)
+    {
+        Voxel voxel;
+        voxel.index = PosToIndex(id);
+        voxel.value = gwdt[id];
+        foreground.Append(voxel);
+    }
+}
+
+
+AppendStructuredBuffer<uint> activeSet;
+RWStructuredBuffer<int> maxIndex;
+
+
+RWStructuredBuffer<float> phiBuffer;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void GetPhi(uint3 id : SV_DispatchThreadID)
+{
+    uint index = PosToIndex(id);
+    phiBuffer[index] = phi[id];
+}
+
+RWTexture3D<float> buff;
+float phiMax;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void GetBuff(uint3 id : SV_DispatchThreadID)
+{
+    buff[id] = phi[id] / phiMax;
+}
+
+RWTexture3D<float> diff;
+RWTexture3D<float> before;
+RWTexture3D<float> after;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void GetDiff(uint3 id : SV_DispatchThreadID)
+{
+    diff[id] = abs(after[id] - before[id]);
+}
+
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitSeed(uint3 id : SV_DispatchThreadID)
+{
+    const uint index = PosToIndex(id);
+    if (index == (uint)seedIndex)
+    {
+        state[id] = SOURCE;
+        phi[id] = 0;
+    }
+    else if (gwdt[id] < threshold[id])
+    {
+        state[id] = BACKGROUND;
+        phi[id] = INFINITE;
+    }
+    else
+    {
+        state[id] = FAR;
+        phi[id] = INFINITE;
+    }
+    parent[id] = index;
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateTree(uint3 id : SV_DispatchThreadID, uint3 g_id : SV_GroupThreadID)
+{
+    const int3 neighborhood_size = int3(NEIGHBORHOOD_X, NEIGHBORHOOD_Y, NEIGHBORHOOD_Z);
+    const int3 neighborhood_offset = int3(1, 1, 1);
+    for (int k = 0; k < neighborhood_size.z; k += THREAD_Z)
+    {
+        for (int j = 0; j < neighborhood_size.y; j += THREAD_Y)
+        {
+            for (int i = 0; i < neighborhood_size.x; i += THREAD_X)
+            {
+                const int3 n_id = g_id + int3(i, j, k);
+                if (all(n_id < neighborhood_size))
+                {
+                    const int3 read_at = (int3)id + int3(i, j, k) - neighborhood_offset;
+                    shared_gwdt[n_id.x][n_id.y][n_id.z] = gwdt[read_at];
+                    shared_phi[n_id.x][n_id.y][n_id.z] = phi[read_at];
+                }
+            }
+        }
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+
+    if(state[id] == BACKGROUND) return;
+    {
+        const int3 n_id = g_id + neighborhood_offset;
+        uint3 parent_id = 0;
+        float min_dist = INFINITE;
+        const float factor_a = max(shared_gwdt[n_id.x][n_id.y][n_id.z],GWDT_MIN) / maxIntensity;
+        for (int offset_z = -1; offset_z <= 1; offset_z++)
+        {
+            for (int offset_y = -1; offset_y <= 1; offset_y++)
+            {
+                for (int offset_x = -1; offset_x <= 1; offset_x++)
+                {
+                    const int3 offset = int3(offset_x, offset_y, offset_z);
+                    const int diff = abs(offset_x) + abs(offset_y) + abs(offset_z);
+                    int3 n_id_source = n_id + offset;
+                    const float dist_neighbor = shared_phi[n_id_source.x][n_id_source.y][n_id_source.z];
+                    const float factor_b = max(shared_gwdt[n_id_source.x][n_id_source.y][n_id_source.z],GWDT_MIN) /
+                        maxIntensity;
+                    const float new_dist = new_distance(dist_neighbor,factor_a, factor_b, diff);
+        
+                    if (new_dist < min_dist)
+                    {
+                        min_dist = new_dist;
+                        parent_id = (int3)id + offset;
+                    }
+                }
+            }
+        }
+        if (shared_phi[n_id.x][n_id.y][n_id.z] > min_dist)
+        {
+            phi[id] = min_dist;
+            parent[id] = PosToIndex(parent_id);
+            dispatchBuffer[0] = 1;
+        }
+    }
+}
+
+float GI(float intensity)
+{
+    float lamda = 10;
+    float ret = exp(lamda * (1 - intensity / maxIntensity) * (1 - intensity / maxIntensity));
+    return ret;
+}
+
+RWStructuredBuffer<uint> parentBuffer1;
+RWStructuredBuffer<uint> parentBuffer2;
+RWStructuredBuffer<uint> parentBuffer;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void GetParent(uint3 id : SV_DispatchThreadID)
+{
+    const uint index = PosToIndex(id);
+    // if (index < dims.x * dims.y * dims.z / 2)
+    // {
+    //     parentBuffer1[index] = parent[id];
+    // }
+    // else
+    // {
+    //     parentBuffer2[index - dims.x * dims.y * dims.z / 2] = parent[id];
+    // }
+    parentBuffer[index] = parent[id];
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitSeedFI(uint3 id : SV_DispatchThreadID)
+{
+    if (PosToIndex(id) == (uint)seedIndex)
+    {
+        phi[id] = 0;
+    }
+    else
+    {
+        phi[id] = INFINITE;
+    }
+    parent[id] = PosToIndex(id);
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateFI(uint3 id : SV_DispatchThreadID, uint3 g_id : SV_GroupThreadID)
+{
+    const int3 neighborhood_size = int3(NEIGHBORHOOD_X, NEIGHBORHOOD_Y, NEIGHBORHOOD_Z);
+    const int3 neighborhood_offset = int3(1, 1, 1);
+    for (int k = 0; k < neighborhood_size.z; k += THREAD_Z)
+    {
+        for (int j = 0; j < neighborhood_size.y; j += THREAD_Y)
+        {
+            for (int i = 0; i < neighborhood_size.x; i += THREAD_X)
+            {
+                const int3 n_id = g_id + int3(i, j, k);
+                if (all(n_id < neighborhood_size))
+                {
+                    const int3 read_at = (int3)id + int3(i, j, k) - neighborhood_offset;
+                    shared_gwdt[n_id.x][n_id.y][n_id.z] = gwdt[read_at];
+                    shared_phi[n_id.x][n_id.y][n_id.z] = phi[read_at];
+                }
+            }
+        }
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    const int3 n_id = g_id + neighborhood_offset;
+    uint parent_index = 0;
+    float min_dist = INFINITE;
+    const float factor_a = max(shared_gwdt[n_id.x][n_id.y][n_id.z],GWDT_MIN) / maxIntensity;
+    for (int offset_z = -1; offset_z <= 1; offset_z++)
+    {
+        for (int offset_y = -1; offset_y <= 1; offset_y++)
+        {
+            for (int offset_x = -1; offset_x <= 1; offset_x++)
+            {
+                const int3 offset = int3(offset_x, offset_y, offset_z);
+                const int3 id_neighbor = (int3)id + offset;
+                const int diff = abs(offset_x) + abs(offset_y) + abs(offset_z);
+                int3 n_id_source = n_id + offset;
+                const float dist_neighbor = shared_phi[n_id_source.x][n_id_source.y][n_id_source.z];
+                const float factor_b = max(shared_gwdt[n_id_source.x][n_id_source.y][n_id_source.z],GWDT_MIN) /
+                    maxIntensity;
+                const float new_dist = new_distance(dist_neighbor,factor_a, factor_b, diff);
+    
+                if (new_dist < min_dist)
+                {
+                    min_dist = new_dist;
+                    parent_index = PosToIndex(id_neighbor);
+                }
+            }
+        }
+    }
+    if (shared_phi[n_id.x][n_id.y][n_id.z] > min_dist)
+    {
+        phi[id] = min_dist;
+        parent[id] = parent_index;
+        dispatchBuffer[0] = 1;
+    }
+}
+
+RWTexture3D<uint> src;
+RWStructuredBuffer<uint> dst;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void TransformDataUint(uint3 id : SV_DispatchThreadID)
+{
+    dst[PosToIndex(id.xyz)] = src[id];
+}
+
+
+RWTexture3D<float> srcF;
+RWStructuredBuffer<float> dstF;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void TransformDataFloat(uint3 id : SV_DispatchThreadID)
+{
+    dstF[PosToIndex(id.xyz)] = 256 * srcF[id];
+}
+
+
+StructuredBuffer<int> targetBuffer;
+uint targetNum;
+float intensity;
+int undo;
+
+[numthreads(128, 1, 1)]
+void AdjustIntensity(uint3 id: SV_DISPATCHTHREADID)
+{
+    if (id.x < targetNum)
+    {
+        uint3 pos = IndexToPos(targetBuffer[id.x]);
+        if (undo > 0.01)
+        {
+            bias[pos] = 0.5;
+        }
+        else
+        {
+            bias[pos] = 0.5 + threshold[id / THRESHOLD_BLOCK_SIZE];
+        }
+    }
+}
+
+
+[numthreads(128, 1, 1)]
+void AdjustIntensityWithValue(uint3 id: SV_DISPATCHTHREADID)
+{
+    if (id.x < targetNum)
+    {
+        uint3 pos = IndexToPos(targetBuffer[id.x]);
+        bias[pos] += intensity / 255.0f;
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitBias(uint3 id : SV_DispatchThreadID)
+{
+    bias[id] = 0.5f;
+}
+
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void ApplyBias(uint3 id : SV_DispatchThreadID)
+{
+    volume[id] = origin[id] + bias[id] - 0.5f;
+}
+
+
+RWTexture3D<float> visualization;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void Visualization(uint3 id : SV_DispatchThreadID)
+{
+    //if(gwdt[id]<10/255.0f) visualization[id] = gwdt[id]/maxIntensity;
+    ////else visualization[id] = 3*(gwdt[id]/max_intensity+0.1)*(gwdt[id]/max_intensity+0.1);
+    //else visualization[id] =max(10/255.0f,(gwdt[id]/3));
+    //visualization[id] = gwdt[id]/maxIntensity;
+    // float count = 0;
+    // float num = 0;
+    // for (int i = -1; i <= 1; i++)
+    // {
+    //     int x2 = (int)id.x + i;
+    //     if (x2 < 0 || x2 >= (int)dims.x)
+    //         continue;
+    //     for (int j = -1; j <= 1; j++)
+    //     {
+    //         int y2 = (int)id.y + j;
+    //         if (y2 < 0 || y2 >= (int)dims.y)
+    //             continue;
+    //         for (int k = -1; k <= 1; k++)
+    //         {
+    //             int z2 = (int)id.z + k;
+    //             if (z2 < 0 || z2 >= (int)dims.z)
+    //                 continue;
+    //             int diff = abs(i) + abs(j) + abs(k);
+    //             if (diff > max_diff)
+    //                 continue;
+    //             num++;
+    //             uint3 id2 = uint3(x2, y2, z2);
+    //             if (gwdt[id2] < gwdt[id]) count++;
+    //         }
+    //      }
+    //     if (count / num < 0.4f || gwdt[id] < 0.1f) visualization[id] = 0;
+    // }
+    // visualization[id] = 1-(gwdt[id]/max_intensity*2);
+    visualization[id] = gwdt[id] / maxIntensity*2;
+}
+
+StructuredBuffer<int> maskTargetBuffer;
+//Calculating the altered mask due to blocker
+[numthreads(128, 1, 1)]
+void ModifyMask(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < targetNum)
+    {
+        uint3 pos = IndexToPos(maskTargetBuffer[id.x]);
+        if (undo) mask[pos] -= 1;
+        else mask[pos] += 1;
+    }
+}
+
+StructuredBuffer<int> selectionTargetBuffer;
+//Calculating the altered mask due to blocker
+[numthreads(128, 1, 1)]
+void ModifySelection(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < targetNum)
+    {
+        uint3 pos = IndexToPos(selectionTargetBuffer[id.x]);
+        selection[pos] = 1;
+    }
+}
+
+RWStructuredBuffer<float> maskedVolumeBuffer;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void GetMaskedVolumeData(uint3 id : SV_DispatchThreadID)
+{
+    if (mask[id] > 0)
+    {
+        maskedVolumeBuffer[PosToIndex(id)] = 0;
+    }
+    else
+    {
+        maskedVolumeBuffer[PosToIndex(id)] = origin[id];
+    }
+}
+
+
+RWTexture3D<float> connection;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitConnectionSeed(uint3 id : SV_DispatchThreadID)
+{
+    if (PosToIndex(id) == (uint)seedIndex)
+    {
+        connection[id] = 1;
+    }
+    else
+    {
+        connection[id] = 0;
+    }
+}
+
+groupshared float shared_connection[NEIGHBORHOOD_X][NEIGHBORHOOD_Y][NEIGHBORHOOD_Z];
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateConnection(uint3 id : SV_DispatchThreadID, uint3 g_id : SV_GroupThreadID)
+{
+    const int3 neighborhood_size = int3(NEIGHBORHOOD_X, NEIGHBORHOOD_Y, NEIGHBORHOOD_Z);
+    const int3 neighborhood_offset = int3(1, 1, 1);
+    for (int k = 0; k < neighborhood_size.z; k += THREAD_Z)
+    {
+        for (int j = 0; j < neighborhood_size.y; j += THREAD_Y)
+        {
+            for (int i = 0; i < neighborhood_size.x; i += THREAD_X)
+            {
+                const int3 n_id = g_id + int3(i, j, k);
+                if (all(n_id < neighborhood_size))
+                {
+                    const int3 read_at = (int3)id + int3(i, j, k) - neighborhood_offset;
+                    shared_connection[n_id.x][n_id.y][n_id.z] = connection[read_at];
+                }
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    
+    const int3 n_id = g_id + neighborhood_offset;
+    
+    if (volume[id] < threshold[id] || shared_connection[n_id.x][n_id.y][n_id.z] > 0 || mask[id] > 0)
+        return;
+    for (int offset_z = -1; offset_z <= 1; offset_z++)
+    {
+        for (int offset_y = -1; offset_y <= 1; offset_y++)
+        {
+            for (int offset_x = -1; offset_x <= 1; offset_x++)
+            {
+                const int3 offset = int3(offset_x, offset_y, offset_z);
+                int3 n_id_neighbor = n_id + offset;
+                if(shared_connection[n_id_neighbor.x][n_id_neighbor.y][n_id_neighbor.z] == 1)
+                {
+                    connection[id] = 1;
+                    activeSet.Append(PosToIndex(id));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitClusterSeed(uint3 id : SV_DispatchThreadID)
+{
+    if (PosToIndex(id) == (uint)seedIndex)
+    {
+        connection[id] = 1;
+    }
+    else
+    {
+        connection[id] = 0;
+    }
+}
+
+float viewThreshold;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateCluster(uint3 id : SV_DispatchThreadID)
+{
+    if (origin[id] < viewThreshold || connection[id] > 0)
+        return;
+    bool is_neighbor = false;
+    for (int i = -1; i <= 1; i++)
+    {
+        int x2 = (int)id.x + i;
+        if (x2 < 0 || x2 >= (int)dims.x)
+            continue;
+        for (int j = -1; j <= 1; j++)
+        {
+            int y2 = (int)id.y + j;
+            if (y2 < 0 || y2 >= (int)dims.y)
+                continue;
+            for (int k = -1; k <= 1; k++)
+            {
+                int z2 = (int)id.z + k;
+                if (z2 < 0 || z2 >= (int)dims.z)
+                    continue;
+                int diff = abs(i) + abs(j) + abs(k);
+                if (diff > max_diff)
+                    continue;
+                uint3 id2 = uint3(x2, y2, z2);
+                is_neighbor = is_neighbor || connection[id2] > 0;
+            }
+        }
+    }
+    if (is_neighbor && connection[id] < 0.9)
+    {
+        connection[id] = 1;
+        activeSet.Append(PosToIndex(id));
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitTrunk(uint3 id : SV_DispatchThreadID)
+{
+    if (PosToIndex(id) == (uint)seedIndex)
+    {
+        connection[id] = 1;
+    }
+    else
+    {
+        connection[id] = 0;
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateTrunk(uint3 id : SV_DispatchThreadID, uint3 g_id : SV_GroupThreadID)
+{
+    const int3 neighborhood_size = int3(NEIGHBORHOOD_X, NEIGHBORHOOD_Y, NEIGHBORHOOD_Z);
+    const int3 neighborhood_offset = int3(1, 1, 1);
+    for (int k = 0; k < neighborhood_size.z; k += THREAD_Z)
+    {
+        for (int j = 0; j < neighborhood_size.y; j += THREAD_Y)
+        {
+            for (int i = 0; i < neighborhood_size.x; i += THREAD_X)
+            {
+                const int3 n_id = g_id + int3(i, j, k);
+                if (all(n_id < neighborhood_size))
+                {
+                    const int3 read_at = (int3)id + int3(i, j, k) - neighborhood_offset;
+                    shared_connection[n_id.x][n_id.y][n_id.z] = connection[read_at];
+                }
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    
+    const int3 n_id = g_id + neighborhood_offset;
+    
+    if (origin[id] < threshold[id] || shared_connection[n_id.x][n_id.y][n_id.z] > 0 || mask[id] > 0)
+        return;
+
+    for (int offset_z = -1; offset_z <= 1; offset_z++)
+    {
+        for (int offset_y = -1; offset_y <= 1; offset_y++)
+        {
+            for (int offset_x = -1; offset_x <= 1; offset_x++)
+            {
+                const int3 offset = int3(offset_x, offset_y, offset_z);
+                const int3 n_id_neighbor = n_id + offset;
+                if(shared_connection[n_id_neighbor.x][n_id_neighbor.y][n_id_neighbor.z] == 1)
+                {
+                    connection[id] = 1;
+                    activeSet.Append(PosToIndex(id));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+
+StructuredBuffer<int> eraseTargetBuffer;
+//Calculating the altered mask due to blocker
+[numthreads(128, 1, 1)]
+void InitErase(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < targetNum)
+    {
+        uint3 pos = IndexToPos(eraseTargetBuffer[id.x]);
+        phi[pos] = INFINITE;
+    }
+}

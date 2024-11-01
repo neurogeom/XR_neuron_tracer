@@ -1,0 +1,159 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel InitForegroundBoundary
+#pragma kernel UpdateForeground
+#pragma kernel ExtendForeground
+#pragma kernel InitThreshold
+#pragma kernel ModifyThreshold
+#pragma kernel GetPipeCasingTargets
+
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+#define THREAD_X 8
+#define THREAD_Y 8
+#define THREAD_Z 4
+
+int bkgThreshold;
+uint3 dims;
+RWTexture3D<float> connection;
+Texture3D<float> origin;
+AppendStructuredBuffer<uint> sourceSet;
+
+uint PosToIndex(uint3 pos)
+{
+    uint index = pos.x + pos.y * dims.x + pos.z * dims.x * dims.y;
+    return index;
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitForegroundBoundary(uint3 id : SV_DispatchThreadID)
+{
+    if (origin[id] < bkgThreshold / 255.0f || id.z == 0 || id.z == (dims.z - 1)||id.x == 0 || id.x == (dims.x - 1) || id.y == 0 || id.y == (dims.y - 1))
+    {
+        connection[id] = 1;
+    }
+    else
+    {
+        connection[id] = 0;
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void UpdateForeground(uint3 id : SV_DispatchThreadID)
+{
+    if (origin[id]<bkgThreshold/255.0f||connection[id] >0)
+        return;
+    bool isNeighbor = false;
+    for (int i = -1; i <= 1; i++)
+    {
+        int x2 = (int) id.x + i;
+        if (x2 < 0 || x2 >= (int) dims.x)
+            continue;
+        for (int j = -1; j <= 1; j++)
+        {
+            int y2 = (int) id.y + j;
+            if (y2 < 0 || y2 >= (int) dims.y)
+                continue;
+            for (int k = -1; k <= 1; k++)
+            {
+                int z2 = (int) id.z + k;
+                if (z2 < 0 || z2 >= (int) dims.z)
+                    continue;
+                int diff = abs(i) + abs(j) + abs(k);
+                if (diff > 3)
+                    continue;
+                uint3 id2 = uint3(x2, y2, z2);
+                isNeighbor = isNeighbor || connection[id2] > 0;
+            }
+        }
+    }
+    if (isNeighbor && connection[id] <0.9)
+    {
+        connection[id] = 1;
+        sourceSet.Append(PosToIndex(id));
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void ExtendForeground(uint3 id : SV_DispatchThreadID)
+{
+    if (connection[id] >0)
+        return;
+    bool isNeighbor = false;
+    
+    for (int i = -1; i <= 1; i++)
+    {
+        int x2 = (int) id.x + i;
+        if (x2 < 0 || x2 >= (int) dims.x)
+            continue;
+        for (int j = -1; j <= 1; j++)
+        {
+            int y2 = (int) id.y + j;
+            if (y2 < 0 || y2 >= (int) dims.y)
+                continue;
+            for (int k = -1; k <= 1; k++)
+            {
+                int z2 = (int) id.z + k;
+                if (z2 < 0 || z2 >= (int) dims.z)
+                    continue;
+                int diff = abs(i) + abs(j) + abs(k);
+                if (diff > 3)
+                    continue;
+                uint3 id2 = uint3(x2, y2, z2);
+                isNeighbor = isNeighbor || connection[id2] > 0;
+            }
+        }
+    }
+    if (isNeighbor && connection[id] <0.9)
+    {
+        connection[id] = 1;
+        sourceSet.Append(PosToIndex(id));
+    }
+}
+
+int defaultThreshold;
+int thresholdOffset;
+int curThresh;
+RWTexture3D<float> threshold;
+float3 hitPos;
+float3 direction;
+float viewRadius;
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void InitThreshold(uint3 id : SV_DispatchThreadID)
+{
+    threshold[id] = (float)defaultThreshold/255.0f;
+}
+
+[numthreads(THREAD_X, THREAD_Y, THREAD_Z)]
+void ModifyThreshold(uint3 id : SV_DispatchThreadID)
+{
+    
+    float3 direction2 = float3(id.x,id.y,id.z)-hitPos;
+    float dist = length(cross(direction,direction2))/length(direction);
+    if(dist<=viewRadius)
+    {
+        //threshold[id] = (float)(defaultThreshold + thresholdOffset)/255.0f;
+        threshold[id] = max(29/255.0f,threshold[id] + thresholdOffset/255.0f);
+    }
+}
+
+float3 start;
+float3 end;
+float pipeRadius;
+float radiusBias;
+
+[numthreads(8, 8, 8)]
+void GetPipeCasingTargets(uint3 id : SV_DispatchThreadID)
+{
+    float3 pos2start = float3(id.x,id.y,id.z) - start;
+    float3 pos2end = float3(id.x,id.y,id.z) - end;
+    float3 dir = end - start;
+
+    float dist = length(cross(dir,pos2start))/length(dir);
+    if(dist <= pipeRadius + radiusBias && dist >= pipeRadius && dot(dir, pos2start) >= 0 && dot(-dir, pos2end) >= 0)
+    {
+        sourceSet.Append(PosToIndex(id));
+    }
+}

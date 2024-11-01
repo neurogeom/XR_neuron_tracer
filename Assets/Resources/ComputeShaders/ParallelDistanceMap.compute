@@ -1,0 +1,84 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel DistanceMap
+#pragma kernel ReadTexture
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture3D<int> dist;
+RWTexture3D<int> dist_swap;
+RWTexture3D<float> Result;
+uint3 dM;
+uint stage;
+//Texture3D OccupancyMap;
+//SamplerState samplerOccupancyMap;
+//int depth;
+
+uint occupancy_to_max_dist(uint occupancy) {
+	return occupancy > 0 ? 0 : 255;
+}
+
+[numthreads(8, 8, 1)]
+void DistanceMap(uint3 id : SV_DispatchThreadID)
+{
+	int3 pos;
+	if (stage == 0) {
+		pos = int3(0, id.x, id.y);
+		//Forward
+		uint gi1jk = occupancy_to_max_dist(dist_swap[pos]);
+		for (pos.x = 1; pos.x < dM.x; pos.x++) {
+			uint gijk = min(gi1jk + 1, occupancy_to_max_dist(dist_swap[pos]));
+			dist[pos] = gijk;
+			gi1jk = gijk;
+		}
+		//Backward
+		for (pos.x = dM.x - 2; pos.x >= 0; pos.x--) {
+			uint gijk = min(gi1jk + 1, dist[pos]);
+			dist[pos] = gijk;
+			gi1jk = gijk;
+		}
+	}
+	else if (stage == 1) {
+		pos = uint3(id.x, 0, id.y);
+		for (pos.y = 0; pos.y < dM.y; pos.y++) {
+			uint D = dist[pos];
+
+			for (int n = 1; n < D; ++n) {
+				if (pos.y >= n) {
+					uint D_n = dist[uint3(pos.x, pos.y - n, pos.z)];
+					D = min(D, max(n, D_n));
+				}
+				if ((pos.y + n) < dM.y && n < D) { // note early exit
+					uint D_n = dist[uint3(pos.x, pos.y + n, pos.z)];
+					D = min(D, max(n, D_n));
+				}
+			}
+			dist_swap[pos] = D;
+		}
+	}
+	else if (stage == 2) {
+		pos = uint3(id.x, id.y, 0);
+		for (pos.z = 0; pos.z < dM.z; pos.z++) {
+			uint gijk = dist_swap[pos];
+			uint m_min = gijk;
+			for (int n = 1; n < m_min; ++n) {
+				if (pos.z >= n) {
+					const uint gijnk = dist_swap[uint3(pos.x, pos.y, pos.z - n)];
+					m_min = min(m_min, max(n, gijnk));
+				}
+				if ((pos.z + n) < dM.z && n < m_min) { // note early exit possible
+					const uint gijnk = dist_swap[uint3(pos.x, pos.y, pos.z + n)];
+					m_min = min(m_min, max(n, gijnk));
+				}
+			}
+			dist[pos] = m_min;
+		}
+	}
+	
+	// TODO: insert actual code here!
+}
+
+[numthreads(8, 8, 8)]
+void ReadTexture(uint3 id : SV_DispatchThreadID) {
+	float max_d = max(dM.x, max(dM.y, dM.z));
+	Result[id] = dist[id]>0? dist[id]/max_d:0;
+}

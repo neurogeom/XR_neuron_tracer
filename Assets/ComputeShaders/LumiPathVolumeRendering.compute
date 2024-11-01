@@ -1,0 +1,108 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel VolumeRendering
+
+//StructuredBuffer<float3>EntryPointsBuffer;
+//StructuredBuffer<float3>EntryPointsBuffer;
+//StructuredBuffer<float>Texture3d;
+int entryPointNum,exitPointNum;
+RWTexture2D<float4>Result;
+int width, height, depth;
+//float3 aabbMin, aabbMax;
+float intensity, threshold;
+Texture3D VolumeData;
+SamplerState samplerVolumeData;
+
+bool intersect(float3 origin, float3 direction, float3 aabbMin, float3 aabbMax, out float t0, out float t1) {
+    float3 invR = 1.0 / direction;
+    float3 tbot = invR * (aabbMin - origin);
+    float3 ttop = invR * (aabbMax - origin);
+    float3 tmin = min(ttop, tbot);
+    float3 tmax = max(ttop, tbot);
+    float2 t = max(tmin.xx, tmin.yz);
+    t0 = max(t.x, t.y);
+    t = min(tmax.xx, tmax.yz);
+    t1 = min(t.x, t.y);
+    return t0 <= t1;
+}
+
+float3 get_uv(float3 p) {
+    return (p + 0.5);
+}
+
+void sample_volume(float3 p,float3 aabbMin,float3 aabbMax,int width,int height,int depth,out int x,out int y,out int z) {
+    float3 pnormalized = (p - aabbMin) / (aabbMax - aabbMin);
+    //x = pnormalized.x * (width - 1);
+    //y = pnormalized.y * (height - 1);
+    //z = pnormalized.z * (depth - 1);
+    x = pnormalized.x;
+    y = pnormalized.y;
+    z = pnormalized.z;
+}
+
+float3 createPoint(int index,int num){
+    float z = 1.0f - (2.0f * index + 1.0f) / num;
+    float goldenRation = (sqrt(5.0f) + 1) / 2;
+    float theta = 2 * 3.1415927 * index / goldenRation;
+    float phi = acos(z);
+    return float3(cos(theta)*sin(phi),sin(theta)*sin(phi),cos(phi));
+}
+
+[numthreads(8,8,1)]
+void VolumeRendering (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    float3 start = createPoint(id.x,entryPointNum);
+    float3 end = createPoint(id.y,exitPointNum);
+    float4 result;
+    if (distance(start,end)<0.0001) {
+        Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+    }
+    else {
+        float3 direction = end - start;
+        float t0, t1;
+        float3 aabbMin = float3(-0.5f,-0.5f,-0.5f);
+        float3 aabbMax = float3(0.5f,0.5f,0.5f);
+        if (intersect(start, direction, aabbMin, aabbMax, t0, t1)) {
+            t0 = max(0.0, t0);
+            float3 hitnear = start + direction * t0;
+            float3 hitfar = start + direction * t1;
+            float dist = distance(hitnear, hitfar);
+            float step_size = dist / float(100);
+            float3 ds = normalize(hitfar - hitnear) * 0.01;
+            float3 p = hitnear;
+            float alpha_acc = 0;
+            float4 color_acc = float4(0, 0, 0, 0);
+            float stepsize = 0.01;
+            for (int iter = 0; iter < 100; iter++) {
+                //float3 uv = get_uv(p);
+                //int x, y, z;
+                float3 uv = (p - aabbMin) / (aabbMax - aabbMin);
+                float v = VolumeData.SampleLevel(samplerVolumeData,uv,0);
+                float4 color_sample = float4(v, v, v, v);
+                //float alpha_sample = color_sample.w * stepsize;
+                //color_acc += (1 - alpha_acc) * color_sample * alpha_sample * 3;
+                float alpha_sample = color_sample.w;
+                color_acc += (1 - alpha_acc) * color_sample * alpha_sample;
+                alpha_acc += (1 - alpha_acc) * alpha_sample * alpha_sample;
+                p += ds;
+                if(distance(hitnear,p)>dist)break;
+                if (color_acc.w > 1)break;
+            }
+            //color_acc.x = color_acc.x * 2 + 0.2;
+            //color_acc.y = color_acc.y * 2 + 0.2;
+            //color_acc.z = color_acc.z * 2 + 0.2;
+            //if (color_acc.x > 1)color_acc.x = 1;
+            //if (color_acc.x < 0)color_acc.x = 0;
+            //if (color_acc.y > 1)color_acc.y = 1;
+            //if (color_acc.y < 0)color_acc.y = 0;
+            //if (color_acc.z > 1)color_acc.z = 1;
+            //if (color_acc.z < 0)color_acc.z = 0;
+            //if (color_acc.w > 1)color_acc.w = 1;
+            //if (color_acc.w < 0)color_acc.w = 0;
+            result = color_acc;
+            Result[id.xy]=result;
+        }
+        
+    }
+}
+
